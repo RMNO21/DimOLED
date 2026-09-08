@@ -32,6 +32,7 @@ TimeoutAcMin=10
 DimBrightness=1
 StartWithWindows=1
 Enabled=1
+IgnoreWhenAudioPlaying=1
 ```
 
 | Setting | Default | Description |
@@ -41,6 +42,7 @@ Enabled=1
 | `DimBrightness` | `1` | Brightness level (1–100%) when dimmed |
 | `StartWithWindows` | `1` | Automatically launch at Windows login (1 = yes, 0 = no) |
 | `Enabled` | `1` | Master toggle to enable or disable dimming |
+| `IgnoreWhenAudioPlaying`| `1` | Prevent dimming when audio/video is playing (Media Safe) |
 
 ---
 

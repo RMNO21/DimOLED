@@ -1,7 +1,122 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class WinInput { [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; } [DllImport(""user32.dll"")] public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii); public static uint GetIdleMs() { LASTINPUTINFO lii = new LASTINPUTINFO(); lii.cbSize = (uint)Marshal.SizeOf(lii); GetLastInputInfo(ref lii); return (uint)Environment.TickCount - lii.dwTime; } }" -ErrorAction SilentlyContinue
+$codeDefinition = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class WinInput {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LASTINPUTINFO {
+        public uint cbSize;
+        public uint dwTime;
+    }
+    [DllImport("user32.dll")]
+    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+    public static uint GetIdleMs() {
+        LASTINPUTINFO lii = new LASTINPUTINFO();
+        lii.cbSize = (uint)Marshal.SizeOf(lii);
+        GetLastInputInfo(ref lii);
+        return (uint)Environment.TickCount - lii.dwTime;
+    }
+}
+
+public class AudioChecker {
+    [ComImport]
+    [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+    private class MMDeviceEnumeratorComObject { }
+
+    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDeviceEnumerator {
+        int NotImpl1();
+        [PreserveSig]
+        int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice ppDevice);
+    }
+
+    [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDevice {
+        [PreserveSig]
+        int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+    }
+
+    [Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioMeterInformation {
+        [PreserveSig]
+        int GetPeakValue(out float pfPeak);
+    }
+
+    [Guid("77AA99A0-1BD6-440F-8AE0-48422A59A992"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioSessionManager2 {
+        int NotImpl1();
+        int NotImpl2();
+        [PreserveSig]
+        int GetSessionEnumerator(out IAudioSessionEnumerator SessionEnum);
+    }
+
+    [Guid("E2F5EE11-2070-4E46-B16E-081537F9424F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioSessionEnumerator {
+        [PreserveSig]
+        int GetCount(out int SessionCount);
+        [PreserveSig]
+        int GetSession(int SessionIndex, out IAudioSessionControl Session);
+    }
+
+    [Guid("F4B45649-7462-450A-A168-B528A8F32E03"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioSessionControl {
+        [PreserveSig]
+        int GetState(out int pRetVal);
+    }
+
+    private static readonly Guid IID_IAudioMeterInformation = new Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064");
+    private static readonly Guid IID_IAudioSessionManager2 = new Guid("77AA99A0-1BD6-440F-8AE0-48422A59A992");
+
+    public static bool IsAudioPlaying() {
+        try {
+            var enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
+            IMMDevice device;
+            int hr = enumerator.GetDefaultAudioEndpoint(0, 1, out device); // eRender = 0, eMultimedia = 1
+            if (hr != 0 || device == null) return false;
+
+            // Check 1: Master audio peak meter > 0.001
+            object oMeter;
+            Guid iidMeter = IID_IAudioMeterInformation;
+            hr = device.Activate(ref iidMeter, 23, IntPtr.Zero, out oMeter); // CLSCTX_ALL = 23
+            if (hr == 0 && oMeter != null) {
+                var meter = (IAudioMeterInformation)oMeter;
+                float peak = 0;
+                if (meter.GetPeakValue(out peak) == 0 && peak > 0.001f) {
+                    return true;
+                }
+            }
+
+            // Check 2: Active audio session state (AudioSessionStateActive = 1)
+            object oMgr;
+            Guid iidMgr = IID_IAudioSessionManager2;
+            hr = device.Activate(ref iidMgr, 23, IntPtr.Zero, out oMgr);
+            if (hr == 0 && oMgr != null) {
+                var mgr = (IAudioSessionManager2)oMgr;
+                IAudioSessionEnumerator sessionEnum;
+                if (mgr.GetSessionEnumerator(out sessionEnum) == 0 && sessionEnum != null) {
+                    int count = 0;
+                    if (sessionEnum.GetCount(out count) == 0) {
+                        for (int i = 0; i < count; i++) {
+                            IAudioSessionControl session;
+                            if (sessionEnum.GetSession(i, out session) == 0 && session != null) {
+                                int state;
+                                if (session.GetState(out state) == 0 && state == 1) { // 1 = AudioSessionStateActive
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch { }
+        return false;
+    }
+}
+"@
+Add-Type -TypeDefinition $codeDefinition -ErrorAction SilentlyContinue
 
 $configDir = "$env:LOCALAPPDATA\DimOLED"
 $configFile = "$configDir\config.ini"
@@ -13,6 +128,7 @@ function Load-Config {
         DimBrightness = 1
         StartWithWindows = 1
         Enabled = 1
+        IgnoreWhenAudioPlaying = 1
     }
     if (Test-Path $configFile) {
         Get-Content $configFile | ForEach-Object {
@@ -36,7 +152,8 @@ function Save-Config($cfg) {
         "TimeoutAcMin=$($cfg.TimeoutAcMin)",
         "DimBrightness=$($cfg.DimBrightness)",
         "StartWithWindows=$($cfg.StartWithWindows)",
-        "Enabled=$($cfg.Enabled)"
+        "Enabled=$($cfg.Enabled)",
+        "IgnoreWhenAudioPlaying=$($cfg.IgnoreWhenAudioPlaying)"
     )
     Set-Content -Path $configFile -Value $lines -Encoding ASCII
 
@@ -71,7 +188,7 @@ function Show-SettingsForm {
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "DimOLED - OLED Screen Protection Settings"
-    $form.Size = New-Object System.Drawing.Size(460, 480)
+    $form.Size = New-Object System.Drawing.Size(460, 515)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
@@ -181,13 +298,21 @@ function Show-SettingsForm {
     # Card 3: Preferences
     $cardOptions = New-Object System.Windows.Forms.Panel
     $cardOptions.Location = New-Object System.Drawing.Point(20, 288)
-    $cardOptions.Size = New-Object System.Drawing.Size(405, 80)
+    $cardOptions.Size = New-Object System.Drawing.Size(405, 108)
     $cardOptions.BackColor = $cardBg
     $form.Controls.Add($cardOptions)
 
+    $chkAudio = New-Object System.Windows.Forms.CheckBox
+    $chkAudio.Text = "Do not dim when audio / video is playing (media safe)"
+    $chkAudio.Location = New-Object System.Drawing.Point(18, 10)
+    $chkAudio.AutoSize = $true
+    $chkAudio.Checked = ($cfg.IgnoreWhenAudioPlaying -eq 1)
+    $chkAudio.ForeColor = $fg
+    $cardOptions.Controls.Add($chkAudio)
+
     $chkStartup = New-Object System.Windows.Forms.CheckBox
     $chkStartup.Text = "Start automatically with Windows (silent in tray)"
-    $chkStartup.Location = New-Object System.Drawing.Point(18, 12)
+    $chkStartup.Location = New-Object System.Drawing.Point(18, 42)
     $chkStartup.AutoSize = $true
     $chkStartup.Checked = ($cfg.StartWithWindows -eq 1)
     $chkStartup.ForeColor = $fg
@@ -195,7 +320,7 @@ function Show-SettingsForm {
 
     $chkEnabled = New-Object System.Windows.Forms.CheckBox
     $chkEnabled.Text = "Enable automatic OLED dimming protection"
-    $chkEnabled.Location = New-Object System.Drawing.Point(18, 45)
+    $chkEnabled.Location = New-Object System.Drawing.Point(18, 74)
     $chkEnabled.AutoSize = $true
     $chkEnabled.Checked = ($cfg.Enabled -eq 1)
     $chkEnabled.ForeColor = $fg
@@ -204,7 +329,7 @@ function Show-SettingsForm {
     # Buttons
     $btnSave = New-Object System.Windows.Forms.Button
     $btnSave.Text = "Save & Apply"
-    $btnSave.Location = New-Object System.Drawing.Point(20, 385)
+    $btnSave.Location = New-Object System.Drawing.Point(20, 415)
     $btnSave.Size = New-Object System.Drawing.Size(130, 38)
     $btnSave.BackColor = $accent
     $btnSave.ForeColor = [System.Drawing.Color]::White
@@ -216,6 +341,7 @@ function Show-SettingsForm {
         $cfg.DimBrightness = [int]$track.Value
         $cfg.StartWithWindows = if ($chkStartup.Checked) { 1 } else { 0 }
         $cfg.Enabled = if ($chkEnabled.Checked) { 1 } else { 0 }
+        $cfg.IgnoreWhenAudioPlaying = if ($chkAudio.Checked) { 1 } else { 0 }
         Save-Config $cfg
         [System.Windows.Forms.MessageBox]::Show("Settings saved and applied successfully.", "DimOLED", "OK", "Information")
         $form.Close()
@@ -224,7 +350,7 @@ function Show-SettingsForm {
 
     $btnTest = New-Object System.Windows.Forms.Button
     $btnTest.Text = "Test Dim (3s)"
-    $btnTest.Location = New-Object System.Drawing.Point(160, 385)
+    $btnTest.Location = New-Object System.Drawing.Point(160, 415)
     $btnTest.Size = New-Object System.Drawing.Size(130, 38)
     $btnTest.BackColor = $cardBg
     $btnTest.ForeColor = $fg
@@ -239,7 +365,7 @@ function Show-SettingsForm {
 
     $btnClose = New-Object System.Windows.Forms.Button
     $btnClose.Text = "Close"
-    $btnClose.Location = New-Object System.Drawing.Point(300, 385)
+    $btnClose.Location = New-Object System.Drawing.Point(300, 415)
     $btnClose.Size = New-Object System.Drawing.Size(125, 38)
     $btnClose.BackColor = $cardBg
     $btnClose.ForeColor = $fg
@@ -324,16 +450,19 @@ function Start-TrayService {
         $threshMs = [uint32]($timeoutMin * 60 * 1000)
 
         $idleMs = [WinInput]::GetIdleMs()
+        $audioPlaying = if ($config.IgnoreWhenAudioPlaying -eq 1) { [AudioChecker]::IsAudioPlaying() } else { $false }
 
         if ($idleMs -ge $threshMs -and -not $script:isDimmed) {
-            $cur = Get-DisplayBrightness
-            if ($cur -gt $config.DimBrightness) {
-                $script:origBright = $cur
+            if (-not $audioPlaying) {
+                $cur = Get-DisplayBrightness
+                if ($cur -gt $config.DimBrightness) {
+                    $script:origBright = $cur
+                }
+                Set-DisplayBrightness $config.DimBrightness
+                $script:isDimmed = $true
             }
-            Set-DisplayBrightness $config.DimBrightness
-            $script:isDimmed = $true
         }
-        elseif ($idleMs -lt $threshMs -and $script:isDimmed) {
+        elseif (($idleMs -lt $threshMs -or $audioPlaying) -and $script:isDimmed) {
             $targetRestore = if ($script:origBright -gt $config.DimBrightness) { $script:origBright } else { 85 }
             Set-DisplayBrightness $targetRestore
             $script:isDimmed = $false
