@@ -426,18 +426,19 @@ function Start-TrayService {
     })
 
     $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 400
-    $checkConfigCount = 0
-    $config = Load-Config
+    $timer.Interval = 500
+    $script:checkConfigCount = 0
+    $script:activeConfig = Load-Config
 
     $timer.Add_Tick({
-        $checkConfigCount++
-        if ($checkConfigCount -ge 10) {
-            $checkConfigCount = 0
-            $config = Load-Config
+        $script:checkConfigCount++
+        if ($script:checkConfigCount -ge 6) {
+            $script:checkConfigCount = 0
+            $script:activeConfig = Load-Config
         }
 
-        if ($config.Enabled -ne 1) {
+        $cfg = $script:activeConfig
+        if ($cfg.Enabled -ne 1) {
             if ($script:isDimmed) {
                 Set-DisplayBrightness $script:origBright
                 $script:isDimmed = $false
@@ -446,24 +447,32 @@ function Start-TrayService {
         }
 
         $isAc = ([System.Windows.Forms.SystemInformation]::PowerStatus.PowerLineStatus -eq [System.Windows.Forms.PowerLineStatus]::Online)
-        $timeoutMin = if ($isAc) { $config.TimeoutAcMin } else { $config.TimeoutBatteryMin }
+        $timeoutMin = if ($isAc) { $cfg.TimeoutAcMin } else { $cfg.TimeoutBatteryMin }
         $threshMs = [uint32]($timeoutMin * 60 * 1000)
 
         $idleMs = [WinInput]::GetIdleMs()
-        $audioPlaying = if ($config.IgnoreWhenAudioPlaying -eq 1) { [AudioChecker]::IsAudioPlaying() } else { $false }
+        $audioPlaying = if ($cfg.IgnoreWhenAudioPlaying -eq 1) { [AudioChecker]::IsAudioPlaying() } else { $false }
+
+        # Debug logging every 5 seconds
+        if ($script:checkConfigCount -eq 1) {
+            try {
+                $dbgMsg = "[$(Get-Date -Format 'HH:mm:ss')] isAc=$isAc, timeoutMin=$timeoutMin, idleSec=$([Math]::Round($idleMs/1000)), audio=$audioPlaying, dimmed=$($script:isDimmed)"
+                [System.IO.File]::WriteAllText("$configDir\status.txt", $dbgMsg)
+            } catch {}
+        }
 
         if ($idleMs -ge $threshMs -and -not $script:isDimmed) {
             if (-not $audioPlaying) {
                 $cur = Get-DisplayBrightness
-                if ($cur -gt $config.DimBrightness) {
+                if ($cur -gt $cfg.DimBrightness) {
                     $script:origBright = $cur
                 }
-                Set-DisplayBrightness $config.DimBrightness
+                Set-DisplayBrightness $cfg.DimBrightness
                 $script:isDimmed = $true
             }
         }
         elseif (($idleMs -lt $threshMs -or $audioPlaying) -and $script:isDimmed) {
-            $targetRestore = if ($script:origBright -gt $config.DimBrightness) { $script:origBright } else { 85 }
+            $targetRestore = if ($script:origBright -gt $cfg.DimBrightness) { $script:origBright } else { 85 }
             Set-DisplayBrightness $targetRestore
             $script:isDimmed = $false
         }
