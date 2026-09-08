@@ -326,12 +326,16 @@ function Start-TrayService {
         $idleMs = [WinInput]::GetIdleMs()
 
         if ($idleMs -ge $threshMs -and -not $script:isDimmed) {
-            $script:origBright = Get-DisplayBrightness
+            $cur = Get-DisplayBrightness
+            if ($cur -gt $config.DimBrightness) {
+                $script:origBright = $cur
+            }
             Set-DisplayBrightness $config.DimBrightness
             $script:isDimmed = $true
         }
         elseif ($idleMs -lt $threshMs -and $script:isDimmed) {
-            Set-DisplayBrightness $script:origBright
+            $targetRestore = if ($script:origBright -gt $config.DimBrightness) { $script:origBright } else { 85 }
+            Set-DisplayBrightness $targetRestore
             $script:isDimmed = $false
         }
     })
