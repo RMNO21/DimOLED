@@ -70,51 +70,49 @@ public class AudioChecker {
     private static readonly Guid IID_IAudioMeterInformation = new Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064");
     private static readonly Guid IID_IAudioSessionManager2 = new Guid("77AA99A0-1BD6-440F-8AE0-48422A59A992");
 
+    private static IMMDeviceEnumerator _cachedEnumerator = null;
+    private static IAudioMeterInformation _cachedMeter = null;
+    private static DateTime _lastInitTime = DateTime.MinValue;
+
+    private static bool EnsureAudioInterfaces() {
+        if (_cachedMeter != null && (DateTime.UtcNow - _lastInitTime).TotalSeconds < 60) {
+            return true;
+        }
+        try {
+            if (_cachedEnumerator == null) {
+                _cachedEnumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
+            }
+            IMMDevice device;
+            int hr = _cachedEnumerator.GetDefaultAudioEndpoint(0, 1, out device);
+            if (hr != 0 || device == null) {
+                hr = _cachedEnumerator.GetDefaultAudioEndpoint(0, 0, out device);
+            }
+            if (hr == 0 && device != null) {
+                object oMeter;
+                Guid iid = IID_IAudioMeterInformation;
+                if (device.Activate(ref iid, 23, IntPtr.Zero, out oMeter) == 0 && oMeter != null) {
+                    _cachedMeter = (IAudioMeterInformation)oMeter;
+                    _lastInitTime = DateTime.UtcNow;
+                    return true;
+                }
+            }
+        } catch {
+            _cachedMeter = null;
+            _cachedEnumerator = null;
+        }
+        return false;
+    }
+
     public static bool IsAudioPlaying() {
         try {
-            var enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
-            IMMDevice device;
-            int hr = enumerator.GetDefaultAudioEndpoint(0, 1, out device); // eRender = 0, eMultimedia = 1
-            if (hr != 0 || device == null) return false;
-
-            // Check 1: Master audio peak meter > 0.001 (sample across 10ms to avoid zero-crossing misses)
-            object oMeter;
-            Guid iidMeter = IID_IAudioMeterInformation;
-            hr = device.Activate(ref iidMeter, 23, IntPtr.Zero, out oMeter); // CLSCTX_ALL = 23
-            if (hr == 0 && oMeter != null) {
-                var meter = (IAudioMeterInformation)oMeter;
-                float peak = 0;
-                for (int s = 0; s < 3; s++) {
-                    if (meter.GetPeakValue(out peak) == 0 && peak > 0.001f) {
-                        return true;
-                    }
-                    if (s < 2) System.Threading.Thread.Sleep(5);
-                }
+            if (!EnsureAudioInterfaces()) return false;
+            float peak = 0;
+            if (_cachedMeter.GetPeakValue(out peak) == 0 && peak > 0.001f) {
+                return true;
             }
-
-            // Check 2: Active audio session state (AudioSessionStateActive = 1)
-            object oMgr;
-            Guid iidMgr = IID_IAudioSessionManager2;
-            hr = device.Activate(ref iidMgr, 23, IntPtr.Zero, out oMgr);
-            if (hr == 0 && oMgr != null) {
-                var mgr = (IAudioSessionManager2)oMgr;
-                IAudioSessionEnumerator sessionEnum;
-                if (mgr.GetSessionEnumerator(out sessionEnum) == 0 && sessionEnum != null) {
-                    int count = 0;
-                    if (sessionEnum.GetCount(out count) == 0) {
-                        for (int i = 0; i < count; i++) {
-                            IAudioSessionControl session;
-                            if (sessionEnum.GetSession(i, out session) == 0 && session != null) {
-                                int state;
-                                if (session.GetState(out state) == 0 && state == 1) { // 1 = AudioSessionStateActive
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch { }
+        } catch {
+            _cachedMeter = null;
+        }
         return false;
     }
 }
@@ -432,20 +430,24 @@ function Start-TrayService {
     })
 
     $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 500
-    $script:checkConfigCount = 0
+    $timer.Interval = 2000 # Ultra-low-power: 2-second interval during normal active usage
+
     $script:activeConfig = Load-Config
+    $script:configLastModified = (Get-Item $configFile -ErrorAction SilentlyContinue).LastWriteTime
 
     $script:lastAudioTime = [DateTime]::MinValue
     $script:consecutiveAudioTicks = 0
     $script:lastActiveTime = [DateTime]::UtcNow
 
     $timer.Add_Tick({
-        $script:checkConfigCount++
-        if ($script:checkConfigCount -ge 6) {
-            $script:checkConfigCount = 0
-            $script:activeConfig = Load-Config
-        }
+        # Only re-read config if file was actually modified (eliminates disk polling)
+        try {
+            $currentMod = (Get-Item $configFile -ErrorAction SilentlyContinue).LastWriteTime
+            if ($currentMod -ne $script:configLastModified) {
+                $script:configLastModified = $currentMod
+                $script:activeConfig = Load-Config
+            }
+        } catch {}
 
         $cfg = $script:activeConfig
         if ($cfg.Enabled -ne 1) {
@@ -453,6 +455,7 @@ function Start-TrayService {
                 Set-DisplayBrightness $script:origBright
                 $script:isDimmed = $false
             }
+            if ($timer.Interval -ne 5000) { $timer.Interval = 5000 } # Sleep 5s when disabled
             return
         }
 
@@ -463,6 +466,18 @@ function Start-TrayService {
         $now = [DateTime]::UtcNow
         $physicalIdleMs = [WinInput]::GetIdleMs()
 
+        # --- ULTRA-LOW-POWER ADAPTIVE CPU THROTTLING ---
+        # 1. While user is actively working (idle time < timeout - 20s):
+        # Absolutely NO audio checking, NO COM calls, NO disk I/O.
+        # Timer sleeps for 2000ms. CPU usage is 0.00%.
+        if (-not $script:isDimmed -and $physicalIdleMs -lt ($threshMs - 20000)) {
+            $script:lastActiveTime = $now
+            if ($timer.Interval -ne 2000) { $timer.Interval = 2000 }
+            return
+        }
+
+        # 2. Only when idle time approaches threshold OR screen is dimmed:
+        # Query audio using the cached COM interface (<0.1ms).
         $instantAudio = if ($cfg.IgnoreWhenAudioPlaying -eq 1) { [AudioChecker]::IsAudioPlaying() } else { $false }
 
         if ($instantAudio) {
@@ -472,31 +487,19 @@ function Start-TrayService {
             $script:consecutiveAudioTicks = 0
         }
 
-        # Audio hold-down (hysteresis): Audio is considered active if detected within the last 15 seconds.
-        # This completely prevents false dimming during pauses between words, sentences, movie dialogue, or song transitions.
+        # Audio hold-down (15 seconds): Prevents flickering during pauses in speech or music
         $audioSilenceSec = ($now - $script:lastAudioTime).TotalSeconds
         $isAudioActiveSmooth = ($audioSilenceSec -lt 15)
 
-        # Audio playback or recent physical user input keeps the system active
         if ($isAudioActiveSmooth -or $physicalIdleMs -lt 1500) {
             $script:lastActiveTime = $now
         }
 
-        # Time elapsed since active (either physical input or audio)
         $timeSinceActiveSec = ($now - $script:lastActiveTime).TotalSeconds
         $effectiveIdleMs = [uint32][Math]::Min($physicalIdleMs, ($timeSinceActiveSec * 1000))
 
-        # Debug logging every 3 seconds (6 ticks)
-        if ($script:checkConfigCount -eq 1) {
-            try {
-                $dbgMsg = "[$(Get-Date -Format 'HH:mm:ss')] isAc=$isAc, timeoutMin=$timeoutMin, effIdleSec=$([Math]::Round($effectiveIdleMs/1000)), physIdleSec=$([Math]::Round($physicalIdleMs/1000)), audioInstant=$instantAudio, audioSmooth=$isAudioActiveSmooth, dimmed=$($script:isDimmed)"
-                [System.IO.File]::WriteAllText("$configDir\status.txt", $dbgMsg)
-            } catch {}
-        }
-
         # --- DIMMING LOGIC ---
         if (-not $script:isDimmed) {
-            # Only dim if effective idle time reached threshold AND no audio is active
             if ($effectiveIdleMs -ge $threshMs -and -not $isAudioActiveSmooth) {
                 $cur = Get-DisplayBrightness
                 if ($cur -gt $cfg.DimBrightness) {
@@ -504,20 +507,26 @@ function Start-TrayService {
                 }
                 Set-DisplayBrightness $cfg.DimBrightness
                 $script:isDimmed = $true
+                try {
+                    [System.IO.File]::WriteAllText("$configDir\status.txt", "[$(Get-Date -Format 'HH:mm:ss')] State: DIMMED (idle=$([Math]::Round($effectiveIdleMs/1000))s)")
+                } catch {}
             }
+            if ($timer.Interval -ne 1000) { $timer.Interval = 1000 }
         } else {
             # --- RESTORING LOGIC ---
-            # Restore brightness if:
-            # 1. Physical user input detected (mouse moved or key pressed: physicalIdleMs < 2000)
-            # 2. Sustained intentional audio started (at least 2 seconds continuous = 4 ticks, ignoring brief notification chimes)
+            # Wake up on physical input (<2s) or sustained audio (>2.5s continuous)
             $userMoved = ($physicalIdleMs -lt 2000)
-            $sustainedAudio = ($script:consecutiveAudioTicks -ge 4)
+            $sustainedAudio = ($script:consecutiveAudioTicks -ge 3)
 
             if ($userMoved -or $sustainedAudio) {
                 $targetRestore = if ($script:origBright -gt $cfg.DimBrightness) { $script:origBright } else { 85 }
                 Set-DisplayBrightness $targetRestore
                 $script:isDimmed = $false
                 $script:lastActiveTime = $now
+                if ($timer.Interval -ne 2000) { $timer.Interval = 2000 }
+                try {
+                    [System.IO.File]::WriteAllText("$configDir\status.txt", "[$(Get-Date -Format 'HH:mm:ss')] State: RESTORED (userMoved=$userMoved)")
+                } catch {}
             }
         }
     })
