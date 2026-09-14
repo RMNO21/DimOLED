@@ -77,15 +77,18 @@ public class AudioChecker {
             int hr = enumerator.GetDefaultAudioEndpoint(0, 1, out device); // eRender = 0, eMultimedia = 1
             if (hr != 0 || device == null) return false;
 
-            // Check 1: Master audio peak meter > 0.001
+            // Check 1: Master audio peak meter > 0.001 (sample across 10ms to avoid zero-crossing misses)
             object oMeter;
             Guid iidMeter = IID_IAudioMeterInformation;
             hr = device.Activate(ref iidMeter, 23, IntPtr.Zero, out oMeter); // CLSCTX_ALL = 23
             if (hr == 0 && oMeter != null) {
                 var meter = (IAudioMeterInformation)oMeter;
                 float peak = 0;
-                if (meter.GetPeakValue(out peak) == 0 && peak > 0.001f) {
-                    return true;
+                for (int s = 0; s < 3; s++) {
+                    if (meter.GetPeakValue(out peak) == 0 && peak > 0.001f) {
+                        return true;
+                    }
+                    if (s < 2) System.Threading.Thread.Sleep(5);
                 }
             }
 
@@ -399,12 +402,15 @@ function Start-TrayService {
         $script:origBright = Get-DisplayBrightness
         Set-DisplayBrightness $c.DimBrightness
         $script:isDimmed = $true
+        $script:consecutiveAudioTicks = -10
+        $script:lastAudioTime = [DateTime]::MinValue
     })
 
     $itemRestore = $menu.Items.Add("Restore Brightness")
     $itemRestore.Add_Click({
         Set-DisplayBrightness $script:origBright
         $script:isDimmed = $false
+        $script:lastActiveTime = [DateTime]::UtcNow
     })
 
     $null = $menu.Items.Add("-")
@@ -430,6 +436,10 @@ function Start-TrayService {
     $script:checkConfigCount = 0
     $script:activeConfig = Load-Config
 
+    $script:lastAudioTime = [DateTime]::MinValue
+    $script:consecutiveAudioTicks = 0
+    $script:lastActiveTime = [DateTime]::UtcNow
+
     $timer.Add_Tick({
         $script:checkConfigCount++
         if ($script:checkConfigCount -ge 6) {
@@ -450,19 +460,44 @@ function Start-TrayService {
         $timeoutMin = if ($isAc) { $cfg.TimeoutAcMin } else { $cfg.TimeoutBatteryMin }
         $threshMs = [uint32]($timeoutMin * 60 * 1000)
 
-        $idleMs = [WinInput]::GetIdleMs()
-        $audioPlaying = if ($cfg.IgnoreWhenAudioPlaying -eq 1) { [AudioChecker]::IsAudioPlaying() } else { $false }
+        $now = [DateTime]::UtcNow
+        $physicalIdleMs = [WinInput]::GetIdleMs()
 
-        # Debug logging every 5 seconds
+        $instantAudio = if ($cfg.IgnoreWhenAudioPlaying -eq 1) { [AudioChecker]::IsAudioPlaying() } else { $false }
+
+        if ($instantAudio) {
+            $script:lastAudioTime = $now
+            $script:consecutiveAudioTicks++
+        } else {
+            $script:consecutiveAudioTicks = 0
+        }
+
+        # Audio hold-down (hysteresis): Audio is considered active if detected within the last 15 seconds.
+        # This completely prevents false dimming during pauses between words, sentences, movie dialogue, or song transitions.
+        $audioSilenceSec = ($now - $script:lastAudioTime).TotalSeconds
+        $isAudioActiveSmooth = ($audioSilenceSec -lt 15)
+
+        # Audio playback or recent physical user input keeps the system active
+        if ($isAudioActiveSmooth -or $physicalIdleMs -lt 1500) {
+            $script:lastActiveTime = $now
+        }
+
+        # Time elapsed since active (either physical input or audio)
+        $timeSinceActiveSec = ($now - $script:lastActiveTime).TotalSeconds
+        $effectiveIdleMs = [uint32][Math]::Min($physicalIdleMs, ($timeSinceActiveSec * 1000))
+
+        # Debug logging every 3 seconds (6 ticks)
         if ($script:checkConfigCount -eq 1) {
             try {
-                $dbgMsg = "[$(Get-Date -Format 'HH:mm:ss')] isAc=$isAc, timeoutMin=$timeoutMin, idleSec=$([Math]::Round($idleMs/1000)), audio=$audioPlaying, dimmed=$($script:isDimmed)"
+                $dbgMsg = "[$(Get-Date -Format 'HH:mm:ss')] isAc=$isAc, timeoutMin=$timeoutMin, effIdleSec=$([Math]::Round($effectiveIdleMs/1000)), physIdleSec=$([Math]::Round($physicalIdleMs/1000)), audioInstant=$instantAudio, audioSmooth=$isAudioActiveSmooth, dimmed=$($script:isDimmed)"
                 [System.IO.File]::WriteAllText("$configDir\status.txt", $dbgMsg)
             } catch {}
         }
 
-        if ($idleMs -ge $threshMs -and -not $script:isDimmed) {
-            if (-not $audioPlaying) {
+        # --- DIMMING LOGIC ---
+        if (-not $script:isDimmed) {
+            # Only dim if effective idle time reached threshold AND no audio is active
+            if ($effectiveIdleMs -ge $threshMs -and -not $isAudioActiveSmooth) {
                 $cur = Get-DisplayBrightness
                 if ($cur -gt $cfg.DimBrightness) {
                     $script:origBright = $cur
@@ -470,11 +505,20 @@ function Start-TrayService {
                 Set-DisplayBrightness $cfg.DimBrightness
                 $script:isDimmed = $true
             }
-        }
-        elseif (($idleMs -lt $threshMs -or $audioPlaying) -and $script:isDimmed) {
-            $targetRestore = if ($script:origBright -gt $cfg.DimBrightness) { $script:origBright } else { 85 }
-            Set-DisplayBrightness $targetRestore
-            $script:isDimmed = $false
+        } else {
+            # --- RESTORING LOGIC ---
+            # Restore brightness if:
+            # 1. Physical user input detected (mouse moved or key pressed: physicalIdleMs < 2000)
+            # 2. Sustained intentional audio started (at least 2 seconds continuous = 4 ticks, ignoring brief notification chimes)
+            $userMoved = ($physicalIdleMs -lt 2000)
+            $sustainedAudio = ($script:consecutiveAudioTicks -ge 4)
+
+            if ($userMoved -or $sustainedAudio) {
+                $targetRestore = if ($script:origBright -gt $cfg.DimBrightness) { $script:origBright } else { 85 }
+                Set-DisplayBrightness $targetRestore
+                $script:isDimmed = $false
+                $script:lastActiveTime = $now
+            }
         }
     })
     $timer.Start()
