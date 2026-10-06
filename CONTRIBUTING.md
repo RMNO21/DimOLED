@@ -1,9 +1,8 @@
-# Contributing Guidelines
+# Contributing to DimOLED
 
-Thank you for contributing to DimOLED!
+Contributions are welcome to help protect OLED displays against burn-in!
 
-## Development Workflow
-1. Fork and clone the repository.
-2. Create a feature or fix branch from \$defaultBranch\.
-3. Adhere to established project standards and test your modifications locally.
-4. Submit a clear and well-documented pull request.
+## Rules
+- Zero CPU usage while idle.
+- Seamless multi-monitor support.
+- Fully compatible with Windows 10 and Windows 11 DWM.
