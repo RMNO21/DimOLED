@@ -1,4 +1,26 @@
-# DimOLED
+# 🌟 DimOLED
+
+<p align="center">
+  <b>Lightweight, Zero-Flicker Windows Background Utility for OLED Burn-In Prevention</b>
+  <br/>
+  <i>Developed with precision by <a href="https://github.com/RMNO21">RMNO21</a></i>
+</p>
+
+<p align="center">
+  <a href="https://github.com/RMNO21/DimOLED/releases/latest"><img src="https://img.shields.io/github/v/release/RMNO21/DimOLED?style=for-the-badge&color=0078D4&logo=windows&logoColor=white" alt="Latest Release" /></a>
+  <a href="https://github.com/RMNO21/DimOLED/stargazers"><img src="https://img.shields.io/github/stars/RMNO21/DimOLED?style=for-the-badge&color=dfb317" alt="Stars" /></a>
+  <img src="https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D4?style=for-the-badge&logo=windows" alt="Platform" />
+  <img src="https://img.shields.io/badge/Display-OLED%20%7C%20QD--OLED%20%7C%20WOLED-blueviolet?style=for-the-badge" alt="OLED Focus" />
+  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/RMNO21/DimOLED/releases/latest">
+    <img src="https://img.shields.io/badge/⬇️_DOWNLOAD_LATEST_RELEASE-v1.0.0-0078D4?style=for-the-badge&labelColor=000000" height="42" alt="Download DimOLED" />
+  </a>
+</p>
+
+---
 
 **DimOLED** is a lightweight, zero-flicker background utility for Windows designed to protect OLED screens from burn-in and save power by automatically dimming the physical display brightness when the system is idle.
 
@@ -65,6 +87,14 @@ IgnoreWhenAudioPlaying=1
   ```cmd
   powershell.exe -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\DimOLED\DimOLED.ps1" -ShowSettings
   ```
+
+---
+
+## ⭐ Support & Star
+
+If DimOLED helps protect your OLED display, please consider **starring this repository**! It helps the project reach more users and motivates further development.
+
+Contributions, bug reports, and suggestions are welcome via [GitHub Issues](https://github.com/RMNO21/DimOLED/issues).
 
 ---
 
